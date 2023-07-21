@@ -1,0 +1,110 @@
+const express = require("express")
+const jwt = require("jsonwebtoken")
+const jwksClient = require("jwks-rsa")
+const cors = require("cors")
+const bodyParser = require("body-parser")
+const { JsonDB, Config } = require("node-json-db")
+
+const app = express()
+const port = 3000
+
+const ZENDESK_MSG_KEY_ID = "app_645b85068b5dce27a25bb832"
+const ZENDESK_MSG_SECRET = "iLLIOBhQCcV0Q9sJKUm3n7EGPr-n2Az7VZJcSU6kPA5k4TUsFTOXQCS_BszGtNxeJsnX4xBUCNIrcfZECB710w"
+const ZENDESK_SUBDOMAIN = "z3njetdemo-grubhub"
+const DATABASE_FILE_NAME = "todoDatabase"
+const jwksClientInstance = jwksClient({
+  jwksUri: `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/help_center/integration/keys.json`
+})
+
+const authMiddleware = async (request, response, next) => {
+  try {
+    const token = getTokenFromAuthHeader(request)
+    const verifiedTokenPayload = await verifyToken(token)
+    
+    console.log(verifiedTokenPayload)
+    request.userId = verifiedTokenPayload.userId
+    request.externalId = verifiedTokenPayload.externalId
+    next()
+  } catch (err) {
+    console.error(err)
+    response.status(401).json({ message: "Invalid authentication" })
+  }
+}
+
+const getTokenFromAuthHeader = request => {
+  const authorization = request.headers?.authorization
+  if (!authorization) {
+    throw new Error("Authorization header missing")
+  }
+  return authorization.split(" ")[1]
+}
+
+const verifyToken = async token => {
+  const publicKey = await getPublicKeyFromJwks(
+    jwt.decode(token, { complete: true })
+  )
+  return jwt.verify(token, publicKey)
+}
+const getPublicKeyFromJwks = async decodedToken => {
+  //console.log(decodedToken)
+  const kid = decodedToken.header.kid
+  const signingKey = await jwksClientInstance.getSigningKey(kid)
+  return signingKey.rsaPublicKey
+}
+
+app.use(cors())
+app.use(authMiddleware)
+app.use(bodyParser.json())
+
+// In production, use a database
+const db = new JsonDB(new Config(DATABASE_FILE_NAME, true, false, "/"))
+
+app.get("/todo_items", async (request, response) => {
+  const todoItems = await getUserTodoItems(request.userId)
+  response.json({ todo_items: todoItems })
+})
+
+app.post("/todo_items", async (request, response) => {
+  const todoItems = await getUserTodoItems(request.userId)
+  const newItemId = Math.floor(Date.now() * Math.random())
+  const newItem = { id: newItemId, value: request.body.value }
+  todoItems.push(newItem)
+  db.push(`/${request.userId}/todo_items`, todoItems)
+  response.json({ todo_items: todoItems })
+})
+
+app.delete("/todo_items/:itemId", async (request, response) => {
+  const todoItems = await getUserTodoItems(request.userId)
+  const itemIdToDelete = parseInt(request.params.itemId)
+  const filteredTodoItems = todoItems.filter(
+    item => item.id !== itemIdToDelete
+  )
+  db.push(`/${request.userId}/todo_items`, filteredTodoItems)
+  response.json({ todo_items: filteredTodoItems })
+})
+
+app.get("/msg_jwt", async(request, response) => {
+  var token = jwt.sign({ scope: 'user', external_id: request.externalId }, ZENDESK_MSG_SECRET, { header: { kid:  ZENDESK_MSG_KEY_ID } })
+  console.log('Messaging token:')
+  console.log( jwt.decode(token, { complete: true }))
+  response.json(token)
+})
+
+const getUserTodoItems = async userId => {
+  const dataPath = `/${userId}/todo_items`
+  const dataPathExists = await db.exists(dataPath)
+  return dataPathExists ? await db.getData(dataPath) : []
+}
+
+app.listen(port, () => {
+  console.log(
+    `Server running on port ${port}. Visit http://localhost:${port}`
+  )
+})
+
+// christos.papalekas@uahoo.com, christos Papalekas, ,external_id='123456789'
+// Secret: MXbzFRvGERdDr3HydpNhcmumz2rPZhzU0joMWlEHEp9C8TQ7FcNyYn4iYzyaTTqEbn558udqkmxZurfdK4VajQ
+// Key/ID: app_64b2d0736686eb19801ecfe2
+
+// Agent: ChristosPapalekasAgent, Christos.papalekas@gmail.com, captain78
+// end user: chris78captain@yahoo.com, captain78
